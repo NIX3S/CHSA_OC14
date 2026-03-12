@@ -6,7 +6,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     MODEL_PATH=/app/model \
     MAX_TOKENS=512 \
     TEMPERATURE=0.1 \
-    PORT=7860
+    PORT=8000
 
 # Fix Python + deps système
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -30,5 +30,5 @@ USER chsa
 HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
     CMD curl -f http://localhost:7860/health || exit 1
 
-EXPOSE 7860
-CMD ["sh", "-c", "uvicorn app:app --host 0.0.0.0 --port 7860 --workers 1 --log-level info"]
+EXPOSE 8000
+CMD ["sh", "-c", "uvicorn app:app --host 0.0.0.0 --port 8000 --workers 1 --log-level info"]
