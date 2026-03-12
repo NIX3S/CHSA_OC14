@@ -1,3 +1,4 @@
+```mermaid
 flowchart TD
     %% Styles
     classDef init fill:#e1f5fe
@@ -66,4 +67,5 @@ flowchart TD
     
     %% Liens anonymisation détaillés
     I1 -.->|Ex: <HOSPITAL><br/><DOCTOR><br/><PHONE>| I2
+
     I2 -.->|<PERSON><br/><EMAIL>| J
