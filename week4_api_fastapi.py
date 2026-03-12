@@ -153,6 +153,21 @@ STATE = AppState()
 def load_model():
     global STATE
     try:
+        import vllm
+        from vllm import LLM, SamplingParams
+        
+        log.info(f"Chargement via vLLM : {MODEL_PATH}")
+        STATE.llm = LLM(model=MODEL_PATH, trust_remote_code=True)
+        STATE.model_loaded = True
+        log.info(" Modèle chargé via vLLM")
+        return 
+        
+    except ImportError:
+        log.warning("vLLM non disponible, fallback transformers")
+    except Exception as e:
+        log.warning(f"vLLM échoue : {e}, fallback transformers")
+    
+    try:
         import torch
         from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
         
@@ -164,22 +179,36 @@ def load_model():
             torch_dtype=torch.bfloat16,
             device_map="auto",
         )
-        pipe = pipeline("text-generation", model=model, tokenizer=tokenizer)
+        pipe = pipeline(
+            "text-generation", 
+            model=model, 
+            tokenizer=tokenizer,
+            device_map="auto"
+        )
         
         class TransformerWrapper:
-            def __init__(self, pipe): self.pipe = pipe
+            def __init__(self, pipe): 
+                self.pipe = pipe
+            
             def generate(self, prompt: str, max_tokens: int = 512) -> str:
-                result = self.pipe(prompt, max_new_tokens=max_tokens, 
-                                 temperature=TEMPERATURE, do_sample=TEMPERATURE > 0,
-                                 return_full_text=False)
+                result = self.pipe(
+                    prompt, 
+                    max_new_tokens=max_tokens, 
+                    temperature=TEMPERATURE,
+                    do_sample=TEMPERATURE > 0,
+                    pad_token_id=tokenizer.eos_token_id,
+                    return_full_text=False
+                )
                 return result[0]["generated_text"]
         
         STATE.llm = TransformerWrapper(pipe)
         STATE.model_loaded = True
         log.info(" Modèle chargé via TRANSFORMERS")
+        
     except Exception as e:
         log.error(f"Erreur transformers : {e}")
-        log.warning("Mode MOCK activé")
+        log.warning(" Mode MOCK activé")
+
 
 
 
@@ -302,44 +331,39 @@ def mock_triage(symptoms: str) -> Dict:
 
 
 def run_inference(req: TriageRequest) -> Dict:
-    """Lance l'inférence sur le modèle (vLLM ou mock)."""
+    """Lance l'inférence sur le modèle (vLLM/transformers/mock)."""
     if STATE.llm is None:
         return mock_triage(req.symptoms)
 
     prompt = build_prompt(req)
-
+    
     try:
-        # vLLM
-        if hasattr(STATE.llm, "generate"):
-            try:
-                from vllm import SamplingParams
-                params = SamplingParams(
+        start_time = time.perf_counter()
+        
+        # vLLM detection and usage
+        try:
+            import vllm
+            if hasattr(STATE.llm, 'generate'):  # vLLM LLM instance
+                sampling_params = vllm.SamplingParams(
                     temperature=TEMPERATURE,
                     max_tokens=MAX_TOKENS,
-                    stop=["<|im_end|>", "<|im_start|>"],
+                    stop=["<|im_end|>", "<|im_start|>"]
                 )
-                outputs = STATE.llm.generate([prompt], params)
-                if outputs and len(outputs) > 0 and outputs[0].outputs:
-                    raw = outputs[0].outputs[0].text
-                else:
-                    raw = "Erreur vLLM"
-            except Exception as e:
-                log.warning(f"vLLM échoue : {e}, fallback transformers")
-                raw = STATE.llm.generate(prompt, max_tokens=MAX_TOKENS) if hasattr(STATE.llm, "generate") else ""
-
-
-        # Transformers fallback
-        elif hasattr(STATE.llm, "generate"):
+                outputs = STATE.llm.generate([prompt], sampling_params)
+                raw = outputs[0].outputs[0].text
+            else:
+                raise AttributeError("Not vLLM")
+        except (ImportError, AttributeError, Exception):
+            # Transformers fallback
             raw = STATE.llm.generate(prompt, max_tokens=MAX_TOKENS)
-
-        else:
-            return mock_triage(req.symptoms)
-
+        
+        log.info(f"Inférence réussie ({time.perf_counter() - start_time:.2f}s)")
         return parse_triage_response(raw)
-
+        
     except Exception as e:
-        log.error(f"Erreur d'inférence : {e}")
+        log.error(f" Erreur d'inférence : {e}")
         return mock_triage(req.symptoms)
+
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -408,7 +432,6 @@ def root():
 async def triage_endpoint(req: TriageRequest, background_tasks: BackgroundTasks):
     """
     Analyse les symptômes d'un patient et retourne une évaluation de priorité.
-
     - **symptoms** : description libre des symptômes
     - **age** : âge du patient (améliore la précision)
     - **constantes** : FC, TA, SpO2, Température
@@ -493,7 +516,7 @@ if __name__ == "__main__":
     uvicorn.run(
         "week4_api_fastapi:app",
         host="0.0.0.0",
-        port=int(os.getenv("PORT", "7860")),
+        port=int(os.getenv("PORT", "8000")),
         reload=False,
         log_level="info",
     )
