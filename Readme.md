@@ -233,4 +233,3 @@ POC à usage interne CHSA. Non destiné à la production clinique.
 ---
 
 *Développé par Paul Lesage — IA Engineer Junior CHSA — Mars 2026*
-```
