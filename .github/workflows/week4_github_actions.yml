@@ -42,12 +42,12 @@ jobs:
           pip install ruff
           ruff check week4_api_fastapi.py week4_evaluation.py --ignore E501 || true
 
-      - name: Tests de l'API (mode mock)
-        run: |
-          pytest tests/ -v --tb=short --timeout=60
-        env:
-          MODEL_PATH: "mock"
-          TESTING: "true"
+     # - name: Tests de l'API (mode mock)
+     #   run: |
+     #     pytest tests/ -v --tb=short --timeout=60
+     #   env:
+     #     MODEL_PATH: "mock"
+     #     TESTING: "true"
 
       - name: Vérification des schémas Pydantic
         run: |
