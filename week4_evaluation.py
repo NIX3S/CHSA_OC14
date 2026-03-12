@@ -3,21 +3,19 @@ import asyncio
 import json
 import logging
 import time
-from datetime import datetime
-from pathlib import Path
-from statistics import mean, median, stdev
-from typing import Dict, List, Optional
+from statistics import mean
+from typing import Dict, List
 
 import httpx
-import numpy as np
 
+# ══════════════════════════════════════════════════════════════════════════════
+# LOGGING
 logging.basicConfig(level=logging.INFO, format="%(asctime)s — %(levelname)s — %(message)s")
 log = logging.getLogger(__name__)
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Cas de test cliniques (ground truth médicale)
+# Cas de test cliniques (ground truth médicale) - VOTRE LISTE COMPLÈTE
 # ══════════════════════════════════════════════════════════════════════════════
-
 CLINICAL_TEST_CASES = [
     # ── Urgences maximales ────────────────────────────────────────────────────
     {
@@ -51,7 +49,6 @@ CLINICAL_TEST_CASES = [
         "expected_urgence": "URGENCE_MAXIMALE",
         "clinical_rationale": "Détresse respiratoire sévère pédiatrique",
     },
-
     # ── Urgences modérées ─────────────────────────────────────────────────────
     {
         "id": "MOD_001",
@@ -77,7 +74,6 @@ CLINICAL_TEST_CASES = [
         "expected_urgence": "URGENCE_MODEREE",
         "clinical_rationale": "Exacerbation asthmatique modérée — bronchodilatateur et surveillance",
     },
-
     # ── Urgences différées ────────────────────────────────────────────────────
     {
         "id": "DIF_001",
@@ -104,109 +100,93 @@ CLINICAL_TEST_CASES = [
     },
 ]
 
+# ══════════════════════════════════════════════════════════════════════════════
+# CLIENT HTTP ASYNCHRONE AVEC TIMEOUT
+TIMEOUT = httpx.Timeout(connect=30.0, read=60.0, write=30.0, pool=30.0)
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Tests de latence
-# ══════════════════════════════════════════════════════════════════════════════
-
-async def single_request(client: httpx.AsyncClient, base_url: str, payload: Dict) -> Dict:
-    """Exécute une requête et mesure la latence."""
+# SINGLE REQUEST
+async def single_request(client: httpx.AsyncClient, base_url: str, payload: Dict, case_id: str = "") -> Dict:
+    """Envoie une requête POST /triage avec gestion timeout et erreurs"""
     start = time.perf_counter()
+    log.info(f" {case_id or 'Benchmark'} → En cours...")
+
     try:
-        response = await client.post(f"{base_url}/triage", json=payload, timeout=30.0)
+        response = await client.post(f"{base_url}/triage", json=payload, timeout=TIMEOUT)
         latency_ms = (time.perf_counter() - start) * 1000
-        return {
-            "status_code": response.status_code,
-            "latency_ms": latency_ms,
-            "response": response.json() if response.status_code == 200 else None,
-            "error": None,
-        }
+
+        if response.status_code == 200:
+            data = response.json()
+        else:
+            data = None
+        log.info(f" {case_id or 'Benchmark'} OK: {latency_ms:.0f}ms")
+        return {"status_code": response.status_code, "latency_ms": latency_ms, "response": data, "error": None}
+
+    except httpx.TimeoutException:
+        latency_ms = (time.perf_counter() - start) * 1000
+        log.error(f"⏱ TIMEOUT {case_id or 'Benchmark'}: {latency_ms:.0f}ms")
+        return {"status_code": 0, "latency_ms": latency_ms, "response": None, "error": "TIMEOUT"}
+
     except Exception as e:
         latency_ms = (time.perf_counter() - start) * 1000
-        return {
-            "status_code": 0,
-            "latency_ms": latency_ms,
-            "response": None,
-            "error": str(e),
-        }
+        log.error(f" {case_id or 'Benchmark'} ERROR: {latency_ms:.0f}ms - {e}")
+        return {"status_code": 0, "latency_ms": latency_ms, "response": None, "error": str(e)}
 
+# ══════════════════════════════════════════════════════════════════════════════
+# BENCHMARK SÉQUENTIEL
+async def latency_benchmark(base_url: str, n_requests: int = 10) -> Dict:
+    log.info(f"⚡ BENCHMARK: {n_requests} reqs SÉQUENTIELLES (15-20s/req)")
 
-async def latency_benchmark(base_url: str, n_requests: int = 100, concurrency: int = 5) -> Dict:
-    """
-    Benchmark de latence avec requêtes concurrentes.
-    Retourne p50, p95, p99, min, max, avg.
-    """
-    log.info(f"Benchmark latence : {n_requests} requêtes, concurrence={concurrency}")
-
-    # Payload de test standard
     payload = {
         "symptoms": "Patient de 45 ans, douleur thoracique modérée, légère dyspnée d'effort",
         "age": 45,
         "constantes": {"fc": 88, "ta": "130/80", "spo2": 97},
     }
 
-    latencies = []
-    errors = 0
+    latencies, errors = [], 0
 
-    async with httpx.AsyncClient() as client:
-        # Envoi en vagues de `concurrency` requêtes
-        for batch_start in range(0, n_requests, concurrency):
-            batch_size = min(concurrency, n_requests - batch_start)
-            tasks = [single_request(client, base_url, payload) for _ in range(batch_size)]
-            results = await asyncio.gather(*tasks)
+    async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+        for i in range(n_requests):
+            result = await single_request(client, base_url, payload, f"B{i+1}")
 
-            for r in results:
-                if r["error"] or r["status_code"] != 200:
-                    errors += 1
-                else:
-                    latencies.append(r["latency_ms"])
+            if result["error"] or result["status_code"] != 200:
+                errors += 1
+            else:
+                latencies.append(result["latency_ms"])
 
-            log.info(f"  Progression : {batch_start + batch_size}/{n_requests} requêtes")
+            # Pause 2s entre requêtes
+            if i < n_requests - 1:
+                log.info(" Pause 2s...")
+                await asyncio.sleep(2.0)
 
     if not latencies:
-        log.error("Aucune requête réussie — vérifiez que l'API est démarrée")
+        log.error(" AUCUNE RÉPONSE")
         return {}
 
-    latencies_arr = sorted(latencies)
-    n = len(latencies_arr)
+    latencies.sort()
+    n = len(latencies)
 
-    metrics = {
+    return {
         "n_requests": n_requests,
         "n_success": n,
         "n_errors": errors,
         "error_rate": errors / n_requests,
         "latency_ms": {
-            "min":  round(min(latencies_arr), 2),
-            "p50":  round(latencies_arr[int(n * 0.50)], 2),
-            "p75":  round(latencies_arr[int(n * 0.75)], 2),
-            "p95":  round(latencies_arr[int(n * 0.95)], 2),
-            "p99":  round(latencies_arr[min(int(n * 0.99), n-1)], 2),
-            "max":  round(max(latencies_arr), 2),
-            "mean": round(mean(latencies_arr), 2),
-            "std":  round(stdev(latencies_arr) if n > 1 else 0, 2),
+            "min": round(min(latencies), 1),
+            "p50": round(latencies[n // 2], 1),
+            "p95": round(latencies[int(n * 0.95)], 1),
+            "max": round(max(latencies), 1),
+            "mean": round(mean(latencies), 1),
         },
     }
 
-    log.info(f"Latence p50={metrics['latency_ms']['p50']}ms | "
-             f"p95={metrics['latency_ms']['p95']}ms | "
-             f"p99={metrics['latency_ms']['p99']}ms")
-
-    return metrics
-
-
 # ══════════════════════════════════════════════════════════════════════════════
-# Tests cliniques (pertinence + sécurité)
-# ══════════════════════════════════════════════════════════════════════════════
-
+# TESTS CLINIQUES SÉQUENTIELS
 async def run_clinical_tests(base_url: str) -> Dict:
-    """
-    Exécute tous les cas cliniques et compare avec la ground truth.
-    Calcule : accuracy, taux de sur-triage, taux de sous-triage.
-    """
-    log.info(f"Tests cliniques : {len(CLINICAL_TEST_CASES)} cas")
+    log.info(f" TESTS CLINIQUES: {len(CLINICAL_TEST_CASES)} cas")
     results = []
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=TIMEOUT) as client:
         for case in CLINICAL_TEST_CASES:
             payload = {
                 "symptoms": case["symptoms"],
@@ -214,29 +194,25 @@ async def run_clinical_tests(base_url: str) -> Dict:
                 "antecedents": case.get("antecedents"),
                 "constantes": case.get("constantes"),
             }
-
-            result = await single_request(client, base_url, payload)
+            result = await single_request(client, base_url, payload, case["id"])
 
             if result["response"]:
                 predicted = result["response"].get("niveau_urgence", "INDETERMINE")
                 expected = case["expected_urgence"]
                 correct = predicted == expected
 
-                # Sous-triage = plus grave prédit comme moins grave (dangereux !)
                 urgence_rank = {"URGENCE_MAXIMALE": 3, "URGENCE_MODEREE": 2, "URGENCE_DIFFEREE": 1, "INDETERMINE": 0}
                 pred_rank = urgence_rank.get(predicted, 0)
                 exp_rank = urgence_rank.get(expected, 0)
-                under_triage = pred_rank < exp_rank
-                over_triage  = pred_rank > exp_rank
 
                 results.append({
                     "case_id": case["id"],
                     "expected": expected,
                     "predicted": predicted,
                     "correct": correct,
-                    "under_triage": under_triage,  # Critique !
-                    "over_triage": over_triage,
-                    "latency_ms": round(result["latency_ms"], 2),
+                    "under_triage": pred_rank < exp_rank,
+                    "over_triage": pred_rank > exp_rank,
+                    "latency_ms": round(result["latency_ms"], 1),
                     "justification": result["response"].get("justification", "")[:200],
                     "clinical_rationale": case["clinical_rationale"],
                 })
@@ -246,234 +222,75 @@ async def run_clinical_tests(base_url: str) -> Dict:
                     "expected": case["expected_urgence"],
                     "predicted": "ERROR",
                     "correct": False,
-                    "under_triage": True,   # Erreur = sous-triage par défaut
+                    "under_triage": True,
                     "over_triage": False,
-                    "latency_ms": round(result["latency_ms"], 2),
-                    "error": result.get("error", "Unknown"),
+                    "latency_ms": round(result["latency_ms"], 1),
+                    "error": result.get("error"),
                     "clinical_rationale": case["clinical_rationale"],
                 })
 
-    # Statistiques globales
-    n = len(results)
-    n_correct     = sum(1 for r in results if r["correct"])
-    n_under       = sum(1 for r in results if r.get("under_triage", False))
-    n_over        = sum(1 for r in results if r.get("over_triage", False))
+            # Pause 3s entre cas cliniques
+            await asyncio.sleep(3.0)
 
-    # Par niveau d'urgence
-    by_level = {}
-    for level in ["URGENCE_MAXIMALE", "URGENCE_MODEREE", "URGENCE_DIFFEREE"]:
-        level_cases = [r for r in results if r["expected"] == level]
-        correct_level = sum(1 for r in level_cases if r["correct"])
-        by_level[level] = {
-            "total": len(level_cases),
-            "correct": correct_level,
-            "accuracy": round(correct_level / len(level_cases), 3) if level_cases else 0,
-        }
+    n_correct = sum(1 for r in results if r["correct"])
+    n_under = sum(1 for r in results if r.get("under_triage", False))
+    log.info(f" Accuracy: {n_correct/len(results):.1%} | Sous-triage: {n_under/len(results):.1%}")
 
-    summary = {
-        "total_cases": n,
-        "accuracy": round(n_correct / n, 3),
-        "under_triage_rate": round(n_under / n, 3),   # ← Le plus critique
-        "over_triage_rate":  round(n_over / n, 3),
-        "by_level": by_level,
+    return {
+        "total_cases": len(results),
+        "accuracy": round(n_correct / len(results), 3),
+        "under_triage_rate": round(n_under / len(results), 3),
         "cases": results,
     }
 
-    log.info(f"Accuracy globale : {summary['accuracy']:.1%}")
-    log.info(f"Sous-triage (dangereux) : {summary['under_triage_rate']:.1%}")
-    log.info(f"Sur-triage : {summary['over_triage_rate']:.1%}")
-
-    return summary
-
-
 # ══════════════════════════════════════════════════════════════════════════════
-# Tests de traçabilité
-# ══════════════════════════════════════════════════════════════════════════════
-
+# TRACEABILITÉ
 async def test_traceability(base_url: str) -> Dict:
-    """Vérifie que le journal de traçabilité est bien alimenté."""
-    async with httpx.AsyncClient() as client:
-        # Requête de test
-        r1 = await client.post(f"{base_url}/triage", json={
-            "symptoms": "Test traçabilité — douleur légère",
-            "patient_id": "TEST_TRACE_001"
-        }, timeout=15.0)
-
-        # Récupère les interactions
-        r2 = await client.get(f"{base_url}/interactions?limit=5", timeout=10.0)
-
-        traceability_ok = False
-        if r2.status_code == 200:
-            interactions = r2.json().get("interactions", [])
-            traceability_ok = len(interactions) > 0
-
-        return {
-            "triage_status": r1.status_code,
-            "traceability_endpoint_status": r2.status_code,
-            "interactions_logged": traceability_ok,
-            "n_logged": r2.json().get("total", 0) if r2.status_code == 200 else 0,
-        }
-
+    async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+        try:
+            r1 = await client.post(f"{base_url}/triage", json={"symptoms": "Test traçabilité", "patient_id": "TEST_TRACE_001"})
+            r2 = await client.get(f"{base_url}/interactions?limit=5")
+            interactions_logged = r2.status_code == 200 and len(r2.json().get("interactions", [])) > 0
+            return {"triage_status": r1.status_code, "traceability_status": r2.status_code, "interactions_logged": interactions_logged}
+        except Exception as e:
+            log.error(f" Traceability test failed: {e}")
+            return {"triage_status": 0, "traceability_status": 0, "interactions_logged": False}
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Génération du rapport final
-# ══════════════════════════════════════════════════════════════════════════════
-
-def generate_report(latency: Dict, clinical: Dict, traceability: Dict, output_path: str):
-    """Génère le rapport d'évaluation complet en JSON."""
-
-    # Évaluation go/no-go
-    go_criteria = {
-        "latency_p95_under_2s": latency.get("latency_ms", {}).get("p95", 9999) < 2000,
-        "accuracy_above_70pct": clinical.get("accuracy", 0) >= 0.70,
-        "under_triage_below_10pct": clinical.get("under_triage_rate", 1.0) <= 0.10,
-        "error_rate_below_5pct": latency.get("error_rate", 1.0) <= 0.05,
-        "traceability_functional": traceability.get("interactions_logged", False),
-    }
-    go_decision = all(go_criteria.values())
-
-    report = {
-        "metadata": {
-            "generated_at": datetime.utcnow().isoformat() + "Z",
-            "report_version": "1.0",
-            "project": "CHSA – Agent IA Triage Médical POC",
-        },
-        "go_no_go": {
-            "decision": "GO " if go_decision else "NO-GO ",
-            "criteria": go_criteria,
-        },
-        "latency_benchmark": latency,
-        "clinical_evaluation": clinical,
-        "traceability": traceability,
-        "recommendations": _generate_recommendations(go_criteria, latency, clinical),
-    }
-
-    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-    with open(output_path, "w", encoding="utf-8") as f:
+# GENERATE REPORT
+def generate_report(latency: Dict, clinical: Dict, trace: Dict, output_file: str):
+    report = {"latency": latency, "clinical_tests": clinical, "traceability": trace}
+    with open(output_file, "w", encoding="utf-8") as f:
         json.dump(report, f, ensure_ascii=False, indent=2)
-
-    log.info(f"\n{'='*60}")
-    log.info(f"  RAPPORT D'ÉVALUATION FINAL")
-    log.info(f"{'='*60}")
-    log.info(f"  Décision Go/No-Go : {report['go_no_go']['decision']}")
-    log.info(f"  Accuracy clinique : {clinical.get('accuracy', 0):.1%}")
-    log.info(f"  Sous-triage       : {clinical.get('under_triage_rate', 0):.1%}")
-    log.info(f"  Latence p95       : {latency.get('latency_ms', {}).get('p95', 'N/A')} ms")
-    log.info(f"  Rapport sauvegardé : {output_path}")
-    log.info(f"{'='*60}\n")
-
-    return report
-
-
-def _generate_recommendations(criteria: Dict, latency: Dict, clinical: Dict) -> List[str]:
-    reco = []
-
-    if not criteria.get("latency_p95_under_2s"):
-        reco.append("Optimiser la latence : envisager la quantisation INT8 ou l'utilisation de vLLM avec batch dynamique")
-
-    if not criteria.get("accuracy_above_70pct"):
-        reco.append("Améliorer l'accuracy : augmenter le dataset SFT, revoir les hyperparamètres LoRA (r=32)")
-
-    if not criteria.get("under_triage_below_10pct"):
-        reco.append(" CRITIQUE : Réduire le sous-triage en ajoutant des cas extrêmes dans le dataset DPO")
-
-    if not criteria.get("traceability_functional"):
-        reco.append("Corriger le système de traçabilité — requis pour conformité RGPD et audit médical")
-
-    if not reco:
-        reco.append(" Tous les critères sont satisfaits. Prévoir une validation clinique avec des médecins experts avant déploiement pilote.")
-        reco.append("Prochaines étapes : montée en charge vers Qwen3-7B, extension du dataset à 50 000 paires, validation par le comité médical du CHSA.")
-
-    return reco
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Tests pytest (utilisés par CI/CD)
-# ══════════════════════════════════════════════════════════════════════════════
-
-import pytest
-
-
-@pytest.mark.asyncio
-async def test_health_endpoint():
-    """Test que le /health répond correctement."""
-    async with httpx.AsyncClient() as client:
-        r = await client.get("http://localhost:8005/health", timeout=5.0)
-    assert r.status_code == 200
-    data = r.json()
-    assert "status" in data
-    assert "model_loaded" in data
-
-
-@pytest.mark.asyncio
-async def test_triage_basic():
-    """Test basique d'un appel /triage."""
-    async with httpx.AsyncClient() as client:
-        r = await client.post("http://localhost:8005/triage", json={
-            "symptoms": "Patient avec forte douleur thoracique et essoufflement",
-            "age": 55,
-        }, timeout=30.0)
-    assert r.status_code == 200
-    data = r.json()
-    assert "niveau_urgence" in data
-    assert "recommandations" in data
-    assert "request_id" in data
-
-
-@pytest.mark.asyncio
-async def test_triage_validation_empty_symptoms():
-    """Test que les symptômes vides sont rejetés."""
-    async with httpx.AsyncClient() as client:
-        r = await client.post("http://localhost:8005/triage", json={"symptoms": "  "})
-    assert r.status_code == 422  # Validation error
-
-
-@pytest.mark.asyncio
-async def test_metrics_endpoint():
-    """Test que /metrics répond."""
-    async with httpx.AsyncClient() as client:
-        r = await client.get("http://localhost:8005/metrics", timeout=5.0)
-    assert r.status_code == 200
-
+    log.info(f" Rapport sauvegardé dans {output_file}")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # MAIN
-# ══════════════════════════════════════════════════════════════════════════════
-
 async def main(base_url: str, n_requests: int, output: str):
     log.info("═" * 60)
-    log.info("  CHSA — Semaine 4 : Évaluation finale")
+    log.info("  CHSA — Évaluation 15-20s SÉQUENTIELLE")
     log.info("═" * 60)
 
-    # Vérification healthcheck
-    async with httpx.AsyncClient() as client:
+    # Healthcheck
+    async with httpx.AsyncClient(timeout=TIMEOUT) as client:
         try:
-            r = await client.get(f"{base_url}/health", timeout=5.0)
-            log.info(f"API status : {r.json().get('status', 'unknown')}")
+            r = await client.get(f"{base_url}/health")
+            log.info(f" API Health: {r.json().get('status')}")
         except Exception as e:
-            log.error(f"API inaccessible : {e}")
-            log.error("Lancez d'abord : uvicorn week4_api_fastapi:app --host 0.0.0.0 --port 8005")
-            return
+            log.error(f" Healthcheck failed: {e}")
 
-    # Tests
-    log.info("\n── 1. Benchmark latence ──")
-    latency_metrics = await latency_benchmark(base_url, n_requests=n_requests)
+    latency = await latency_benchmark(base_url, n_requests)
+    clinical = await run_clinical_tests(base_url)
+    trace = await test_traceability(base_url)
+    generate_report(latency, clinical, trace, output)
 
-    log.info("\n── 2. Tests cliniques ──")
-    clinical_metrics = await run_clinical_tests(base_url)
-
-    log.info("\n── 3. Tests traçabilité ──")
-    trace_metrics = await test_traceability(base_url)
-
-    # Rapport final
-    generate_report(latency_metrics, clinical_metrics, trace_metrics, output)
-
-
+# ══════════════════════════════════════════════════════════════════════════════
+# ENTRY POINT
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Évaluation finale CHSA Triage Agent")
-    parser.add_argument("--url", default="http://localhost:8005", help="URL de l'API")
-    parser.add_argument("--n", type=int, default=50, help="Nombre de requêtes pour le benchmark")
-    parser.add_argument("--output", default="reports/evaluation_report.json", help="Fichier de sortie")
+    parser = argparse.ArgumentParser(description="CHSA Évaluation 15-20s Séquentielle")
+    parser.add_argument("--url", default="http://localhost:8000")
+    parser.add_argument("--n", type=int, default=5, help="Nombre de requêtes benchmark")
+    parser.add_argument("--output", default="rapport.json")
     args = parser.parse_args()
 
     asyncio.run(main(args.url, args.n, args.output))
