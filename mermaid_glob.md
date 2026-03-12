@@ -1,3 +1,4 @@
+'''mermaid
 graph TB
     %% Utilisateurs
     Client[ Client/Symptoms] -->|POST /triage| LoadBalancer[ Load Balancer]
@@ -79,3 +80,4 @@ graph TB
     QwenModel ~~~ BADGE_LATENCY
     Benchmark ~~~ BADGE_ACCURACY
     QwenModel ~~~ BADGE_SAFE
+
