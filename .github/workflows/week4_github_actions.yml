@@ -33,11 +33,9 @@ jobs:
       - name: Installation des dépendances (sans GPU)
         run: |
           pip install --upgrade pip
-          # Installation sans torch+CUDA pour les tests CI
-          pip install fastapi uvicorn pydantic httpx pytest pytest-asyncio
+          pip install fastapi uvicorn pydantic httpx pytest pytest-asyncio pytest-timeout
           pip install pandas scikit-learn tqdm rouge-score accelerate
-          # Mock vllm et torch pour les tests
-          pip install mock 
+          pip install mock
 
       - name: Linting (ruff)
         run: |
