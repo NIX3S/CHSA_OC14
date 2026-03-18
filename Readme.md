@@ -37,7 +37,7 @@ projet14/
 │   ├── week1_data_pipeline.py      # Pipeline données SFT + DPO (RGPD)
 │   ├── week2_sft_lora.py           # Fine-tuning SFT + LoRA (Qwen3-1.7B)
 │   ├── week3_dpo_alignment.py      # Alignement DPO
-│   ├── week4_api_fastapi.py        # API FastAPI + vLLM
+│   ├── week4_api_fastapi_v2.py       # API FastAPI + vLLM
 │   └── week4_evaluation.py         # Benchmark et évaluation clinique
 ├── checkpoints/
 │   ├── sft/best_model/             # Poids LoRA SFT
@@ -107,7 +107,7 @@ beta=0.1 sur modèle SFT fusionné
 
 ### Semaine 4 — API + Évaluation
 ```bash
-uvicorn week4_api_fastapi:app --host 0.0.0.0 --port 8000
+uvicorn week4_api_fastapi_v2.py:app --host 0.0.0.0 --port 8000
 python week4_evaluation.py --url http://localhost:8000 --n 100
 ```
 
@@ -215,7 +215,15 @@ Métadonnées anonymisées (latence, urgence, `patient_id` client-side)
 Logs traçables (`interactions.jsonl`)
 
 ---
+## Update ---
+week4_api_fastapi_v2.py 
+baisse latency à 9_000 
 
+ajout dockerfile :
+RUN apt-get update && apt-get install -y gcc g++ build-essential
+pip install torch-c-dlpack-ext
+
+---
 ##  Recommandations techniques
 
 1. **Latence** : INT8 quantization + vLLM batching dynamique
